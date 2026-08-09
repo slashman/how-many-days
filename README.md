@@ -20,7 +20,7 @@ $ how-many-days
 
 ```sh
 npm install -g .          # from a clone
-npm install -g how-many-days   # once published
+npm install -g how-many-days
 ```
 
 Installs three equivalent commands: `how-many-days`, `howManyDays`, and `hmd`.
@@ -28,7 +28,7 @@ Installs three equivalent commands: `how-many-days`, `howManyDays`, and `hmd`.
 Without installing:
 
 ```sh
-npx how-many-days         # npm package names are lowercase, so use this form
+npx how-many-days
 ```
 
 ## Usage
