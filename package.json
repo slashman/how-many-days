@@ -1,0 +1,44 @@
+{
+  "name": "how-many-days",
+  "version": "1.0.0",
+  "description": "Count how many distinct days of work are registered in the current git branch",
+  "type": "module",
+  "author": "slashie <slash@slashware.net>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/slashman/how-many-days.git"
+  },
+  "homepage": "https://github.com/slashman/how-many-days#readme",
+  "bugs": {
+    "url": "https://github.com/slashman/how-many-days/issues"
+  },
+  "bin": {
+    "how-many-days": "bin/cli.js",
+    "howManyDays": "bin/cli.js",
+    "hmd": "bin/cli.js"
+  },
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "git",
+    "stats",
+    "days",
+    "commits",
+    "timesheet",
+    "cli"
+  ],
+  "license": "MIT"
+}
