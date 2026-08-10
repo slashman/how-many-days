@@ -139,7 +139,8 @@ export function longestStreak(days) {
   return best
 }
 
-export const GROUP_UNITS = ['year', 'month', 'week']
+export const PERIOD_UNITS = ['year', 'month', 'week']
+export const GROUP_UNITS = [...PERIOD_UNITS, 'author']
 
 /**
  * ISO-8601 week label for a `YYYY-MM-DD` day, e.g. `2026-W32`.
@@ -159,7 +160,7 @@ export function isoWeek(day) {
   return `${year}-W${pad(week)}`
 }
 
-/** The bucket a day falls into for `--by year|month|week`. */
+/** The period a day falls into for `--by year|month|week`. */
 export function groupKeyOf(day, by) {
   switch (by) {
     case 'year':
@@ -174,33 +175,108 @@ export function groupKeyOf(day, by) {
 }
 
 /**
- * Roll a sorted day list up into coarser periods.
+ * Which person a commit belongs to.
  *
- * Days are counted, not calendar days elapsed: a year with commits on 18 days
- * reports 18, and periods with no work at all are simply absent. Because the
- * input is sorted and every key form is monotonic in date, insertion order is
- * already chronological.
+ * Keyed on the email so that one contributor spelled three different ways in
+ * `user.name` stays one person — the same identity the `authors` count already
+ * uses. Names are for display only, and picked in `authorLabels`.
  */
-export function groupDays(days, byDay, by) {
-  const groups = new Map()
-  for (const day of days) {
-    const key = groupKeyOf(day, by)
-    let group = groups.get(key)
-    if (!group) {
-      group = { group: key, days: 0, commits: 0, first: day, last: day, authors: new Set() }
-      groups.set(key, group)
-    }
-    group.days++
-    group.last = day
-    for (const commit of byDay.get(day)) {
-      group.commits++
-      group.authors.add(commit.name)
-    }
+const authorKeyOf = (commit) => commit.email || commit.name
+
+/**
+ * A display name per person: whichever spelling of their name they used most.
+ *
+ * Two people can share a name — a shared machine, a family, a common name — and
+ * silently printing one label twice makes them look like a rendering bug. When
+ * that happens both get their email appended, and only then, so the common case
+ * stays clean.
+ */
+export function authorLabels(commits) {
+  const names = new Map()
+  for (const commit of commits) {
+    const key = authorKeyOf(commit)
+    if (!names.has(key)) names.set(key, new Map())
+    const counts = names.get(key)
+    counts.set(commit.name, (counts.get(commit.name) ?? 0) + 1)
   }
-  return [...groups.values()].map((group) => ({
-    ...group,
-    authors: [...group.authors].sort(),
+
+  const busiest = new Map()
+  const seen = new Map()
+  for (const [key, counts] of names) {
+    const name = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0]
+    busiest.set(key, name)
+    seen.set(name, (seen.get(name) ?? 0) + 1)
+  }
+  return new Map(
+    [...busiest].map(([key, name]) => [key, seen.get(name) > 1 ? `${name} <${key}>` : name])
+  )
+}
+
+/** The bucket one commit falls into along a single dimension. */
+const keyOf = (dimension, day, commit) =>
+  dimension === 'author' ? authorKeyOf(commit) : groupKeyOf(day, dimension)
+
+/**
+ * Break days down along one or more dimensions, nesting as it goes.
+ *
+ * `dimensions` is applied outermost-first, so `['year', 'author']` gives a row
+ * per year, each carrying a nested `groups` array of the people who worked that
+ * year; swapping them inverts the view. Every level reports the same shape, so
+ * a consumer can recurse without special-casing depth.
+ *
+ * Days are counted, not calendar days elapsed — a year with commits on 18 days
+ * reports 18 — and buckets with no work are absent rather than zero. Day counts
+ * along the author dimension overlap: two people committing on the same day is
+ * one day of work, and it belongs to both of them, so those rows sum to more
+ * than their parent's total. That is inherent to the question, not a bug.
+ *
+ * `authors` holds one entry per person, not per spelling of a name, so its
+ * length agrees with both the top-level `authors` count and the number of rows
+ * an `author` dimension nested underneath would produce.
+ *
+ * Periods come out chronologically (the input is sorted and every key form is
+ * monotonic in date, so insertion order is enough). People come out busiest
+ * first, since there is no natural order to fall back on.
+ */
+export function buildGroups(days, byDay, dimensions, labels) {
+  const entries = []
+  for (const day of days) {
+    for (const commit of byDay.get(day)) entries.push([day, commit])
+  }
+  return groupEntries(entries, dimensions, labels ?? authorLabels(entries.map(([, c]) => c)))
+}
+
+function groupEntries(entries, [dimension, ...rest], labels) {
+  const buckets = new Map()
+  for (const entry of entries) {
+    const [day, commit] = entry
+    const key = keyOf(dimension, day, commit)
+    let bucket = buckets.get(key)
+    if (!bucket) {
+      bucket = { key, first: day, days: new Set(), commits: 0, people: new Set(), entries: [] }
+      buckets.set(key, bucket)
+    }
+    bucket.days.add(day)
+    bucket.commits++
+    bucket.last = day
+    bucket.people.add(authorKeyOf(commit))
+    if (rest.length) bucket.entries.push(entry)
+  }
+
+  const rows = [...buckets.values()].map((bucket) => ({
+    group: dimension === 'author' ? labels.get(bucket.key) : bucket.key,
+    days: bucket.days.size,
+    commits: bucket.commits,
+    first: bucket.first,
+    last: bucket.last,
+    authors: [...bucket.people].map((key) => labels.get(key)).sort(),
+    ...(rest.length ? { groups: groupEntries(bucket.entries, rest, labels) } : {}),
   }))
+
+  if (dimension !== 'author') return rows
+  return rows.sort(
+    (a, b) => b.days - a.days || b.commits - a.commits || a.group.localeCompare(b.group)
+  )
 }
 
 /** Group commits into days and derive the summary stats the CLI reports. */
@@ -214,26 +290,27 @@ export function summarize(commits, opts = {}) {
   }
 
   const days = [...byDay.keys()].sort()
-  const authors = new Set(commits.map((c) => c.email || c.name))
+  const labels = authorLabels(commits)
   const first = days[0] ?? null
   const last = days[days.length - 1] ?? null
-  const { by = null } = opts
+  // One dimension or several; a bare string is accepted for convenience.
+  const by = opts.by ? [opts.by].flat() : []
 
   return {
     days: days.length,
     commits: commits.length,
-    authors: authors.size,
+    authors: labels.size,
     first,
     last,
     spanDays: first && last ? Math.round((toUTC(last) - toUTC(first)) / DAY_MS) + 1 : 0,
     longestStreak: longestStreak(days),
-    ...(by ? { by, groups: groupDays(days, byDay, by) } : {}),
+    ...(by.length ? { by, groups: buildGroups(days, byDay, by, labels) } : {}),
     breakdown: days.map((day) => {
       const dayCommits = byDay.get(day)
       return {
         day,
         commits: dayCommits.length,
-        authors: [...new Set(dayCommits.map((c) => c.name))].sort(),
+        authors: [...new Set(dayCommits.map((c) => labels.get(authorKeyOf(c))))].sort(),
       }
     }),
   }

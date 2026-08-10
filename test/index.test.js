@@ -1,15 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { dayOf, groupKeyOf, isoWeek, longestStreak, summarize } from '../src/index.js'
+import { authorLabels, dayOf, groupKeyOf, isoWeek, longestStreak, summarize } from '../src/index.js'
 
-const commit = (iso, name = 'Ada') => ({
+const commit = (iso, name = 'Ada', email = `${name.toLowerCase()}@example.com`) => ({
   hash: iso,
   authorEpoch: Date.parse(iso),
   authorIso: iso,
   committerEpoch: Date.parse(iso),
   committerIso: iso,
   name,
-  email: `${name.toLowerCase()}@example.com`,
+  email,
   subject: 'work',
 })
 
@@ -79,7 +79,7 @@ test('--by rolls days up into periods, counting days and not span', () => {
     ],
     { by: 'year' }
   )
-  assert.equal(stats.by, 'year')
+  assert.deepEqual(stats.by, ['year'])
   assert.deepEqual(
     stats.groups.map((g) => [g.group, g.days, g.commits, g.first, g.last]),
     [
@@ -127,6 +127,115 @@ test('omits grouping entirely unless asked for', () => {
   const stats = summarize([commit('2026-03-04T09:00:00+00:00')])
   assert.equal('groups' in stats, false)
   assert.equal('by' in stats, false)
+})
+
+test('--by author counts each person’s own days', () => {
+  const stats = summarize(
+    [
+      commit('2026-03-04T09:00:00+00:00', 'Ada'),
+      commit('2026-03-04T10:00:00+00:00', 'Grace'),
+      commit('2026-03-05T10:00:00+00:00', 'Grace'),
+      commit('2026-03-06T10:00:00+00:00', 'Grace'),
+    ],
+    { by: 'author' }
+  )
+  // Busiest first, and the shared 4th counts for both — 4 listed against 3 real.
+  assert.deepEqual(
+    stats.groups.map((g) => [g.group, g.days, g.commits]),
+    [
+      ['Grace', 3, 3],
+      ['Ada', 1, 1],
+    ]
+  )
+  assert.equal(stats.days, 3)
+  assert.equal(
+    stats.groups.reduce((sum, g) => sum + g.days, 0),
+    4
+  )
+})
+
+test('dimensions nest, outermost first, and invert when swapped', () => {
+  const commits = [
+    commit('2025-12-02T09:00:00+00:00', 'Ada'),
+    commit('2026-03-04T09:00:00+00:00', 'Ada'),
+    commit('2026-03-04T10:00:00+00:00', 'Grace'),
+    commit('2026-03-05T10:00:00+00:00', 'Grace'),
+  ]
+
+  const byYear = summarize(commits, { by: ['year', 'author'] })
+  assert.deepEqual(byYear.by, ['year', 'author'])
+  assert.deepEqual(
+    byYear.groups.map((g) => [g.group, g.days, g.groups.map((c) => [c.group, c.days])]),
+    [
+      ['2025', 1, [['Ada', 1]]],
+      [
+        '2026',
+        2,
+        [
+          ['Grace', 2],
+          ['Ada', 1],
+        ],
+      ],
+    ]
+  )
+
+  const byAuthor = summarize(commits, { by: ['author', 'year'] })
+  assert.deepEqual(
+    byAuthor.groups.map((g) => [g.group, g.days, g.groups.map((c) => [c.group, c.days])]),
+    [
+      [
+        'Ada',
+        2,
+        [
+          ['2025', 1],
+          ['2026', 1],
+        ],
+      ],
+      ['Grace', 2, [['2026', 2]]],
+    ]
+  )
+})
+
+test('one person spelled several ways stays one person', () => {
+  const commits = [
+    commit('2026-03-04T09:00:00+00:00', 'Ada Lovelace', 'ada@example.com'),
+    commit('2026-03-05T09:00:00+00:00', 'ada', 'ada@example.com'),
+    commit('2026-03-06T09:00:00+00:00', 'ada', 'ada@example.com'),
+  ]
+  const stats = summarize(commits, { by: 'author' })
+  assert.equal(stats.authors, 1)
+  // Labelled with the spelling used most, not the first one seen.
+  assert.deepEqual(
+    stats.groups.map((g) => [g.group, g.days]),
+    [['ada', 3]]
+  )
+})
+
+test('two people sharing a name are told apart by email', () => {
+  const labels = authorLabels([
+    commit('2026-03-04T09:00:00+00:00', 'Alex', 'alex@one.com'),
+    commit('2026-03-05T09:00:00+00:00', 'Alex', 'alex@two.com'),
+    commit('2026-03-06T09:00:00+00:00', 'Ada', 'ada@example.com'),
+  ])
+  assert.deepEqual(
+    [...labels.values()].sort(),
+    ['Ada', 'Alex <alex@one.com>', 'Alex <alex@two.com>']
+  )
+})
+
+test('the authors count agrees with the rows an author dimension yields', () => {
+  const commits = [
+    commit('2026-03-04T09:00:00+00:00', 'Ada Lovelace', 'ada@example.com'),
+    commit('2026-03-04T10:00:00+00:00', 'ada', 'ada@example.com'),
+    commit('2026-03-04T11:00:00+00:00', 'Grace', 'grace@example.com'),
+  ]
+  const stats = summarize(commits, { by: ['year', 'author'] })
+  const [year] = stats.groups
+  // Two identities, three name spellings: the count follows identities.
+  assert.equal(stats.authors, 2)
+  assert.equal(year.authors.length, 2)
+  assert.equal(year.groups.length, 2)
+  assert.deepEqual(stats.breakdown[0].authors, ['Grace', 'ada'])
 })
 
 test('ISO weeks belong to the year holding their Thursday', () => {

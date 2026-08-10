@@ -37,7 +37,8 @@ npx how-many-days
 how-many-days [options] [-- <git log args>]
 
   -l, --list              show a per-day breakdown
-      --by <unit>         roll the days up by year, month or week (ISO weeks)
+      --by <dimension>    break the days down by year, month, week or author;
+                          repeat to nest, outermost first
   -j, --json              print machine-readable JSON
   -m, --me                only your own commits (git config user.email)
   -a, --author <pattern>  only commits matching an author pattern
@@ -62,6 +63,8 @@ or `-- -- src/` work as you'd expect.
 how-many-days --me --list              # my days, with a histogram
 how-many-days --by year                # how many days of work each year
 how-many-days --by week --me           # my pace, week by week
+how-many-days --by author              # who put in how many days
+how-many-days --by year --by author    # each year, broken down by person
 how-many-days --base main              # days spent on this branch alone
 how-many-days --since "3 months ago"   # a recent slice
 how-many-days --day-start 5 --tz local # 2am commits count as the day before
@@ -70,9 +73,9 @@ how-many-days --json | jq .days        # one number, for scripts
 
 ## Breakdowns
 
-`--by year|month|week` rolls the days up into periods. Every column counts days
-of work, so a year that saw two commits reports 1 day, not 365 — and periods with
-no work at all are simply left out rather than printed as zeroes.
+`--by year|month|week|author` breaks the days down along a dimension. Every
+column counts days of work, so a year that saw two commits reports 1 day, not
+365 — and buckets with no work at all are left out rather than printed as zeroes.
 
 ```
 $ how-many-days --by year
@@ -87,19 +90,52 @@ $ how-many-days --by year
   authors         5
 
         days  commits  authors
-  2014   166     1017        5  #######################
-  2015   175     1077        2  ########################
-  2016   139      619        4  ###################
-  2017    76      335        2  ##########
+  2014   166     1017        3  #######################
+  2015   175     1077        1  ########################
+  2016   139      619        3  ###################
+  2017    76      335        1  ##########
   2018     2       10        1  #
 ```
 
 The bar tracks days rather than commits — one frantic afternoon shouldn't
 out-draw a steady fortnight. Weeks are ISO weeks, labelled `2026-W32`, so a week
 straddling New Year belongs to the year holding its Thursday (which is why
-`2025-12-29` reports as `2026-W01`). Combine with `--list` to get the per-day
-histogram underneath the period table, and with `--json` to get a `groups` array
-alongside the existing per-day `breakdown`.
+`2025-12-29` reports as `2026-W01`).
+
+### Nesting dimensions
+
+Repeat `--by` to break one dimension down by another, outermost first. The order
+is the view: `--by year --by author` is a row per year with its people
+underneath, and `--by author --by year` inverts it. `--by year,author` is
+shorthand for the same thing. One period at a time, so `--by year --by month` is
+an error rather than a guess.
+
+```
+$ how-many-days --by year --by author --since 2016-11-01 --until 2017-01-01
+42 days of work on master (since 2016-11-01, until 2017-01-01)
+
+  ...
+
+                     days  commits  authors
+  2016                 42      156        2  ########################
+    slash              37      131  #####################
+    Santiago Zapata     6       25  ###
+
+  Per-person days overlap: a day two people both worked counts once in the total.
+```
+
+Per-person day counts overlap, which is why they add up to more than the total
+above them: a day two people both worked is one day of work, and it belongs to
+both of them. The tool says so rather than leaving the sum looking broken.
+
+People are identified by **email**, not by name, so one contributor who has
+spelled `user.name` three different ways over the years stays one row — labelled
+with whichever spelling they used most. Two different people who genuinely share
+a name get their email appended, and only then, so the common case stays clean.
+
+Combine with `--list` for the per-day histogram underneath, and with `--json` for
+a `groups` array — nested identically, and carrying each bucket's `first` and
+`last` day, which the table leaves out to save width.
 
 ## How days are counted
 

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
   GROUP_UNITS,
+  PERIOD_UNITS,
   assertGitRepo,
   currentUserEmail,
   describeRef,
@@ -22,8 +23,11 @@ Usage
 
 Options
   -l, --list              show a per-day breakdown
-      --by <unit>         roll the days up by year, month or week (ISO weeks);
-                          combines with --list, which follows underneath
+      --by <dimension>    break the days down by year, month, week (ISO weeks)
+                          or author. Repeat it to nest one dimension inside
+                          another, outermost first: --by year --by author is a
+                          row per year with its people underneath, and
+                          --by author --by year inverts that
   -j, --json              print machine-readable JSON
   -m, --me                only your own commits (git config user.email)
   -a, --author <pattern>  only commits matching an author pattern
@@ -46,6 +50,8 @@ Examples
   how-many-days                          days of work on the current branch
   how-many-days --me --list              only my days, with a breakdown
   how-many-days --by year                how many days of work each year
+  how-many-days --by author              who put in how many days
+  how-many-days --by year --by author    each year, broken down by person
   how-many-days --base main              days spent on this branch alone
   how-many-days --day-start 5 --tz local nights count toward the day before
   how-many-days -- --first-parent        forward extra flags to git log
@@ -54,7 +60,7 @@ Examples
 function parseArgs(argv) {
   const opts = {
     list: false,
-    by: null,
+    by: [],
     json: false,
     me: false,
     author: null,
@@ -134,11 +140,18 @@ function parseArgs(argv) {
         i++
         break
       case '--by': {
-        const unit = need(i, arg)
-        if (!GROUP_UNITS.includes(unit)) {
-          fail(`--by must be one of ${GROUP_UNITS.join(', ')}, got "${unit}"`)
+        // Accept both `--by year --by author` and `--by year,author`.
+        for (const dimension of need(i, arg).split(',')) {
+          if (!GROUP_UNITS.includes(dimension)) {
+            fail(`--by must be one of ${GROUP_UNITS.join(', ')}, got "${dimension}"`)
+          }
+          if (opts.by.includes(dimension)) fail(`--by ${dimension} given twice`)
+          const clash = opts.by.find((d) => PERIOD_UNITS.includes(d))
+          if (clash && PERIOD_UNITS.includes(dimension)) {
+            fail(`--by takes one period at a time, but got both ${clash} and ${dimension}`)
+          }
+          opts.by.push(dimension)
         }
-        opts.by = unit
         i++
         break
       }
@@ -177,36 +190,81 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
 const BAR_WIDTH = 24
 const bar = (value, max) => '#'.repeat(Math.max(1, Math.round((value / max) * BAR_WIDTH)))
 
+const HEADERS = ['days', 'commits', 'authors']
+const INDENT = 2
+
 /**
- * A period table, one row per year/month/week that saw any work.
+ * Walk the nested groups into flat rows, each tagged with its depth.
  *
- * The bar tracks days rather than commits: the whole point of the tool is days,
- * and a single frantic afternoon should not out-draw a steady fortnight.
- *
- * Authors appear as a count, not a list — over a year that list tends to be
- * everyone, which says nothing and costs a lot of line. The names are still in
- * --json for anyone who wants them.
+ * The authors count is dropped once the author dimension has been applied at
+ * this level or any level above it — the row's person is already named by its
+ * own label or its parent's — and on single-author histories, where the column
+ * would read 1 all the way down.
  */
-function renderGroups(groups, showAuthors) {
-  const maxDays = Math.max(...groups.map((g) => g.days))
-  const columns = [
-    ['days', (g) => g.days],
-    ['commits', (g) => g.commits],
-    ...(showAuthors ? [['authors', (g) => g.authors.length]] : []),
-  ]
-  const labelWidth = Math.max(...groups.map((g) => g.group.length))
-  const widths = columns.map(([header, pick]) =>
-    Math.max(header.length, ...groups.map((g) => String(pick(g)).length))
+function groupRows(groups, dimensions, showAuthors, depth = 0, rows = []) {
+  const countAuthors = showAuthors && !dimensions.slice(0, depth + 1).includes('author')
+  for (const group of groups) {
+    const cells = [group.days, group.commits]
+    if (countAuthors) cells.push(group.authors.length)
+    rows.push({ depth, label: group.group, days: group.days, cells })
+    if (group.groups) groupRows(group.groups, dimensions, showAuthors, depth + 1, rows)
+  }
+  return rows
+}
+
+/** True if any level's day counts sum past what contains them — see buildGroups. */
+function overlaps(groups, total) {
+  const sum = groups.reduce((acc, g) => acc + g.days, 0)
+  if (sum > total) return true
+  return groups.some((g) => g.groups && overlaps(g.groups, g.days))
+}
+
+/**
+ * A breakdown table, one row per period or person that saw any work, nested when
+ * more than one dimension was asked for.
+ *
+ * Column positions are shared across every level, so the numbers line up in one
+ * grid however deep the nesting goes, and the bar tracks days rather than
+ * commits: the whole point of the tool is days, and a single frantic afternoon
+ * should not out-draw a steady fortnight. Bars are scaled against the largest
+ * count anywhere in the table, so a nested row reads as a share of its parent.
+ *
+ * Only counts go in the table. Each group's first and last day are in --json,
+ * where nobody has to pay for the width.
+ */
+function renderGroups(stats) {
+  const dimensions = stats.by
+  const rows = groupRows(stats.groups, dimensions, stats.authors > 1)
+  const maxDays = Math.max(...rows.map((r) => r.days))
+  const labelField = Math.max(...rows.map((r) => r.depth * INDENT + r.label.length))
+  const widths = HEADERS.map((header, i) =>
+    Math.max(
+      rows.some((r) => r.cells.length > i) ? header.length : 0,
+      ...rows.map((r) => (r.cells.length > i ? String(r.cells[i]).length : 0))
+    )
   )
-  const row = (label, cells) => {
+  const line = (indent, label, cells) => {
     const padded = cells.map((cell, i) => `  ${String(cell).padStart(widths[i])}`)
-    return `  ${label.padEnd(labelWidth)}${padded.join('')}`
+    return `  ${' '.repeat(indent)}${label.padEnd(labelField - indent)}${padded.join('')}`
   }
 
-  const lines = [row('', columns.map(([header]) => header))]
-  for (const group of groups) {
-    const cells = columns.map(([, pick]) => pick(group))
-    lines.push(`${row(group.group, cells)}  ${bar(group.days, maxDays)}`)
+  const headers = HEADERS.filter((_, i) => widths[i] > 0)
+  const lines = [line(0, '', headers)]
+  for (const row of rows) {
+    lines.push(`${line(row.depth * INDENT, row.label, row.cells)}  ${bar(row.days, maxDays)}`)
+  }
+
+  // Per-person day counts overlap, so a column of them adds up past its total.
+  // Say so, rather than letting the numbers look like a broken sum.
+  if (overlaps(stats.groups, stats.days)) {
+    const total = stats.groups.reduce((sum, g) => sum + g.days, 0)
+    const shared = 'a day two people both worked counts once'
+    lines.push('')
+    lines.push(
+      dimensions[0] === 'author'
+        ? `  ${total} days listed, ${stats.days} distinct — ${shared}.`
+        : `  Per-person days overlap: ${shared} in the total.`
+    )
   }
   return lines
 }
@@ -230,9 +288,9 @@ function render(stats, meta, opts) {
   lines.push(`  commits per day ${(stats.commits / stats.days).toFixed(1)} avg`)
   if (stats.authors > 1) lines.push(`  authors         ${stats.authors}`)
 
-  if (opts.by) {
+  if (opts.by.length) {
     lines.push('')
-    lines.push(...renderGroups(stats.groups, stats.authors > 1))
+    lines.push(...renderGroups(stats))
   }
 
   if (opts.list) {
