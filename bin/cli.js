@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
+  GROUP_UNITS,
   assertGitRepo,
   currentUserEmail,
   describeRef,
@@ -21,6 +22,8 @@ Usage
 
 Options
   -l, --list              show a per-day breakdown
+      --by <unit>         roll the days up by year, month or week (ISO weeks);
+                          combines with --list, which follows underneath
   -j, --json              print machine-readable JSON
   -m, --me                only your own commits (git config user.email)
   -a, --author <pattern>  only commits matching an author pattern
@@ -42,6 +45,7 @@ Anything after -- is passed straight to git log.
 Examples
   how-many-days                          days of work on the current branch
   how-many-days --me --list              only my days, with a breakdown
+  how-many-days --by year                how many days of work each year
   how-many-days --base main              days spent on this branch alone
   how-many-days --day-start 5 --tz local nights count toward the day before
   how-many-days -- --first-parent        forward extra flags to git log
@@ -50,6 +54,7 @@ Examples
 function parseArgs(argv) {
   const opts = {
     list: false,
+    by: null,
     json: false,
     me: false,
     author: null,
@@ -128,6 +133,15 @@ function parseArgs(argv) {
         opts.base = need(i, arg)
         i++
         break
+      case '--by': {
+        const unit = need(i, arg)
+        if (!GROUP_UNITS.includes(unit)) {
+          fail(`--by must be one of ${GROUP_UNITS.join(', ')}, got "${unit}"`)
+        }
+        opts.by = unit
+        i++
+        break
+      }
       case '--tz': {
         const tz = need(i, arg)
         if (tz !== 'author' && tz !== 'local') fail(`--tz must be "author" or "local", got "${tz}"`)
@@ -160,6 +174,43 @@ function fail(message) {
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
 
+const BAR_WIDTH = 24
+const bar = (value, max) => '#'.repeat(Math.max(1, Math.round((value / max) * BAR_WIDTH)))
+
+/**
+ * A period table, one row per year/month/week that saw any work.
+ *
+ * The bar tracks days rather than commits: the whole point of the tool is days,
+ * and a single frantic afternoon should not out-draw a steady fortnight.
+ *
+ * Authors appear as a count, not a list — over a year that list tends to be
+ * everyone, which says nothing and costs a lot of line. The names are still in
+ * --json for anyone who wants them.
+ */
+function renderGroups(groups, showAuthors) {
+  const maxDays = Math.max(...groups.map((g) => g.days))
+  const columns = [
+    ['days', (g) => g.days],
+    ['commits', (g) => g.commits],
+    ...(showAuthors ? [['authors', (g) => g.authors.length]] : []),
+  ]
+  const labelWidth = Math.max(...groups.map((g) => g.group.length))
+  const widths = columns.map(([header, pick]) =>
+    Math.max(header.length, ...groups.map((g) => String(pick(g)).length))
+  )
+  const row = (label, cells) => {
+    const padded = cells.map((cell, i) => `  ${String(cell).padStart(widths[i])}`)
+    return `  ${label.padEnd(labelWidth)}${padded.join('')}`
+  }
+
+  const lines = [row('', columns.map(([header]) => header))]
+  for (const group of groups) {
+    const cells = columns.map(([, pick]) => pick(group))
+    lines.push(`${row(group.group, cells)}  ${bar(group.days, maxDays)}`)
+  }
+  return lines
+}
+
 function render(stats, meta, opts) {
   const lines = []
   if (stats.commits === 0) {
@@ -179,15 +230,19 @@ function render(stats, meta, opts) {
   lines.push(`  commits per day ${(stats.commits / stats.days).toFixed(1)} avg`)
   if (stats.authors > 1) lines.push(`  authors         ${stats.authors}`)
 
+  if (opts.by) {
+    lines.push('')
+    lines.push(...renderGroups(stats.groups, stats.authors > 1))
+  }
+
   if (opts.list) {
     const max = Math.max(...stats.breakdown.map((d) => d.commits))
     const width = String(max).length
     lines.push('')
     for (const day of stats.breakdown) {
-      const bar = '#'.repeat(Math.max(1, Math.round((day.commits / max) * 24)))
       const count = String(day.commits).padStart(width)
       const who = stats.authors > 1 ? `  ${day.authors.join(', ')}` : ''
-      lines.push(`  ${day.day}  ${count}  ${bar}${who}`)
+      lines.push(`  ${day.day}  ${count}  ${bar(day.commits, max)}${who}`)
     }
   }
 
@@ -208,7 +263,12 @@ function main() {
   }
 
   const commits = readCommits({ ...opts, cwd, author })
-  const stats = summarize(commits, { tz: opts.tz, dayStart: opts.dayStart, use: opts.use })
+  const stats = summarize(commits, {
+    tz: opts.tz,
+    dayStart: opts.dayStart,
+    use: opts.use,
+    by: opts.by,
+  })
 
   const filters = []
   if (author) filters.push(`by ${author}`)

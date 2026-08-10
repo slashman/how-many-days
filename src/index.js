@@ -139,6 +139,70 @@ export function longestStreak(days) {
   return best
 }
 
+export const GROUP_UNITS = ['year', 'month', 'week']
+
+/**
+ * ISO-8601 week label for a `YYYY-MM-DD` day, e.g. `2026-W32`.
+ *
+ * The week belongs to whichever year holds its Thursday, so the first days of
+ * January can land in the previous year's final week — and the last days of
+ * December in the next year's first. Labels built this way still sort
+ * chronologically as plain strings.
+ */
+export function isoWeek(day) {
+  const [y, m, d] = day.split('-').map(Number)
+  const date = new Date(Date.UTC(y, m - 1, d))
+  const weekday = date.getUTCDay() || 7 // Monday = 1 … Sunday = 7
+  date.setUTCDate(date.getUTCDate() + 4 - weekday) // the Thursday of this week
+  const year = date.getUTCFullYear()
+  const week = Math.floor((date.getTime() - Date.UTC(year, 0, 1)) / DAY_MS / 7) + 1
+  return `${year}-W${pad(week)}`
+}
+
+/** The bucket a day falls into for `--by year|month|week`. */
+export function groupKeyOf(day, by) {
+  switch (by) {
+    case 'year':
+      return day.slice(0, 4)
+    case 'month':
+      return day.slice(0, 7)
+    case 'week':
+      return isoWeek(day)
+    default:
+      throw new Error(`unknown grouping unit "${by}"`)
+  }
+}
+
+/**
+ * Roll a sorted day list up into coarser periods.
+ *
+ * Days are counted, not calendar days elapsed: a year with commits on 18 days
+ * reports 18, and periods with no work at all are simply absent. Because the
+ * input is sorted and every key form is monotonic in date, insertion order is
+ * already chronological.
+ */
+export function groupDays(days, byDay, by) {
+  const groups = new Map()
+  for (const day of days) {
+    const key = groupKeyOf(day, by)
+    let group = groups.get(key)
+    if (!group) {
+      group = { group: key, days: 0, commits: 0, first: day, last: day, authors: new Set() }
+      groups.set(key, group)
+    }
+    group.days++
+    group.last = day
+    for (const commit of byDay.get(day)) {
+      group.commits++
+      group.authors.add(commit.name)
+    }
+  }
+  return [...groups.values()].map((group) => ({
+    ...group,
+    authors: [...group.authors].sort(),
+  }))
+}
+
 /** Group commits into days and derive the summary stats the CLI reports. */
 export function summarize(commits, opts = {}) {
   const byDay = new Map()
@@ -153,6 +217,7 @@ export function summarize(commits, opts = {}) {
   const authors = new Set(commits.map((c) => c.email || c.name))
   const first = days[0] ?? null
   const last = days[days.length - 1] ?? null
+  const { by = null } = opts
 
   return {
     days: days.length,
@@ -162,6 +227,7 @@ export function summarize(commits, opts = {}) {
     last,
     spanDays: first && last ? Math.round((toUTC(last) - toUTC(first)) / DAY_MS) + 1 : 0,
     longestStreak: longestStreak(days),
+    ...(by ? { by, groups: groupDays(days, byDay, by) } : {}),
     breakdown: days.map((day) => {
       const dayCommits = byDay.get(day)
       return {

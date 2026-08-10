@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { dayOf, longestStreak, summarize } from '../src/index.js'
+import { dayOf, groupKeyOf, isoWeek, longestStreak, summarize } from '../src/index.js'
 
 const commit = (iso, name = 'Ada') => ({
   hash: iso,
@@ -66,6 +66,89 @@ test('counts distinct authors', () => {
   ])
   assert.equal(stats.authors, 2)
   assert.deepEqual(stats.breakdown[0].authors, ['Ada', 'Grace'])
+})
+
+test('--by rolls days up into periods, counting days and not span', () => {
+  const stats = summarize(
+    [
+      commit('2025-11-30T09:00:00+00:00'),
+      commit('2026-03-04T09:00:00+00:00'),
+      commit('2026-03-04T18:00:00+00:00'),
+      commit('2026-03-09T09:00:00+00:00'),
+      commit('2026-08-09T09:00:00+00:00'),
+    ],
+    { by: 'year' }
+  )
+  assert.equal(stats.by, 'year')
+  assert.deepEqual(
+    stats.groups.map((g) => [g.group, g.days, g.commits, g.first, g.last]),
+    [
+      ['2025', 1, 1, '2025-11-30', '2025-11-30'],
+      ['2026', 3, 4, '2026-03-04', '2026-08-09'],
+    ]
+  )
+})
+
+test('--by month and week bucket the same days differently', () => {
+  const commits = [
+    commit('2026-03-04T09:00:00+00:00'),
+    commit('2026-03-09T09:00:00+00:00'),
+    commit('2026-03-10T09:00:00+00:00'),
+  ]
+  assert.deepEqual(
+    summarize(commits, { by: 'month' }).groups.map((g) => [g.group, g.days]),
+    [['2026-03', 3]]
+  )
+  assert.deepEqual(
+    summarize(commits, { by: 'week' }).groups.map((g) => [g.group, g.days]),
+    [
+      ['2026-W10', 1],
+      ['2026-W11', 2],
+    ]
+  )
+})
+
+test('groups carry the authors who worked in each period', () => {
+  const stats = summarize(
+    [
+      commit('2026-03-04T09:00:00+00:00', 'Ada'),
+      commit('2026-03-04T10:00:00+00:00', 'Grace'),
+      commit('2026-04-04T10:00:00+00:00', 'Grace'),
+    ],
+    { by: 'month' }
+  )
+  assert.deepEqual(
+    stats.groups.map((g) => g.authors),
+    [['Ada', 'Grace'], ['Grace']]
+  )
+})
+
+test('omits grouping entirely unless asked for', () => {
+  const stats = summarize([commit('2026-03-04T09:00:00+00:00')])
+  assert.equal('groups' in stats, false)
+  assert.equal('by' in stats, false)
+})
+
+test('ISO weeks belong to the year holding their Thursday', () => {
+  // 2026-01-01 is a Thursday, so it opens 2026-W01 …
+  assert.equal(isoWeek('2026-01-01'), '2026-W01')
+  // … and the Monday before it belongs to that same week, in the old year.
+  assert.equal(isoWeek('2025-12-29'), '2026-W01')
+  // 2027-01-01 is a Friday, so it closes out 2026's final week.
+  assert.equal(isoWeek('2027-01-01'), '2026-W53')
+  assert.equal(isoWeek('2026-08-09'), '2026-W32') // a Sunday, not W33
+  assert.equal(isoWeek('2026-08-10'), '2026-W33')
+})
+
+test('week labels sort chronologically as plain strings', () => {
+  const days = ['2025-12-28', '2025-12-29', '2026-01-05']
+  const keys = days.map((d) => groupKeyOf(d, 'week'))
+  assert.deepEqual(keys, ['2025-W52', '2026-W01', '2026-W02'])
+  assert.deepEqual([...keys].sort(), keys)
+})
+
+test('rejects an unknown grouping unit', () => {
+  assert.throws(() => groupKeyOf('2026-03-04', 'fortnight'), /fortnight/)
 })
 
 test('longest streak spans month boundaries', () => {

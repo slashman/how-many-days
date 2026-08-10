@@ -37,6 +37,7 @@ npx how-many-days
 how-many-days [options] [-- <git log args>]
 
   -l, --list              show a per-day breakdown
+      --by <unit>         roll the days up by year, month or week (ISO weeks)
   -j, --json              print machine-readable JSON
   -m, --me                only your own commits (git config user.email)
   -a, --author <pattern>  only commits matching an author pattern
@@ -59,11 +60,46 @@ or `-- -- src/` work as you'd expect.
 
 ```sh
 how-many-days --me --list              # my days, with a histogram
+how-many-days --by year                # how many days of work each year
+how-many-days --by week --me           # my pace, week by week
 how-many-days --base main              # days spent on this branch alone
 how-many-days --since "3 months ago"   # a recent slice
 how-many-days --day-start 5 --tz local # 2am commits count as the day before
 how-many-days --json | jq .days        # one number, for scripts
 ```
+
+## Breakdowns
+
+`--by year|month|week` rolls the days up into periods. Every column counts days
+of work, so a year that saw two commits reports 1 day, not 365 — and periods with
+no work at all are simply left out rather than printed as zeroes.
+
+```
+$ how-many-days --by year
+584 days of work on master
+
+  commits         3180
+  first day       2014-03-10
+  last day        2026-06-15
+  calendar span   4481 days
+  longest streak  13 days
+  commits per day 5.4 avg
+  authors         5
+
+        days  commits  authors
+  2014   166     1017        5  #######################
+  2015   175     1077        2  ########################
+  2016   139      619        4  ###################
+  2017    76      335        2  ##########
+  2018     2       10        1  #
+```
+
+The bar tracks days rather than commits — one frantic afternoon shouldn't
+out-draw a steady fortnight. Weeks are ISO weeks, labelled `2026-W32`, so a week
+straddling New Year belongs to the year holding its Thursday (which is why
+`2025-12-29` reports as `2026-W01`). Combine with `--list` to get the per-day
+histogram underneath the period table, and with `--json` to get a `groups` array
+alongside the existing per-day `breakdown`.
 
 ## How days are counted
 
