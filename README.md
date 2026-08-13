@@ -42,6 +42,7 @@ how-many-days [options] [-- <git log args>]
   -l, --list              show a per-day breakdown
       --by <dimension>    break the days down by year, month, week, author or
                           repo; repeat to nest, outermost first
+      --no-bars           leave the histogram out, printing the counts alone
   -j, --json              print machine-readable JSON
   -m, --me                only your own commits (git config user.email)
   -a, --author <pattern>  only commits matching an author pattern
@@ -114,10 +115,10 @@ $ how-many-days -r product-mobile -r product-backend --by repo --by author
 
                    days  commits  authors
   product-backend     3        4        2  ########################
-    Ada               2        2  ################
-    Grace             2        2  ################
+    Ada               2        2           ################
+    Grace             2        2           ################
   product-mobile      3        3        1  ########################
-    Ada               3        3  ########################
+    Ada               3        3           ########################
 
   6 days listed, 5 distinct — a day worked in two repos counts once, and a day two people both worked counts once.
 ```
@@ -153,9 +154,11 @@ $ how-many-days --by year
 ```
 
 The bar tracks days rather than commits — one frantic afternoon shouldn't
-out-draw a steady fortnight. Weeks are ISO weeks, labelled `2026-W32`, so a week
-straddling New Year belongs to the year holding its Thursday (which is why
-`2025-12-29` reports as `2026-W01`).
+out-draw a steady fortnight — and it is scaled against the largest count anywhere
+in the table, so a nested row reads as a share of its parent. `--no-bars` leaves
+the bars out and prints the counts alone, for pasting elsewhere. Weeks are ISO
+weeks, labelled `2026-W32`, so a week straddling New Year belongs to the year
+holding its Thursday (which is why `2025-12-29` reports as `2026-W01`).
 
 ### Nesting dimensions
 
@@ -174,8 +177,8 @@ $ how-many-days --by year --by author --since 2016-11-01 --until 2017-01-01
 
                      days  commits  authors
   2016                 42      156        2  ########################
-    slash              37      131  #####################
-    Santiago Zapata     6       25  ###
+    slash              37      131           #####################
+    Santiago Zapata     6       25           ###
 
   These days overlap: a day two people both worked counts once.
 ```

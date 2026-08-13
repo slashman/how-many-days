@@ -9,20 +9,7 @@ import {
   resolveRepos,
   summarize,
 } from '../src/index.js'
-
-const commit = (iso, name = 'Ada', email = `${name.toLowerCase()}@example.com`) => ({
-  hash: iso,
-  authorEpoch: Date.parse(iso),
-  authorIso: iso,
-  committerEpoch: Date.parse(iso),
-  committerIso: iso,
-  name,
-  email,
-  subject: 'work',
-})
-
-/** A commit as readRepoCommits hands it over: tagged with the repo it came from. */
-const inRepo = (repo, iso, name) => ({ ...commit(iso, name), repo })
+import { commit, inRepo } from './fixtures.js'
 
 test('buckets by the timezone the commit was recorded in', () => {
   // 23:30 in +02:00 is still the 9th where the author sat, though it is the

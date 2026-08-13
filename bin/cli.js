@@ -4,7 +4,6 @@ import { basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   GROUP_UNITS,
-  OVERLAPPING_UNITS,
   PERIOD_UNITS,
   assertGitRepo,
   currentUserEmail,
@@ -13,6 +12,7 @@ import {
   resolveRepos,
   summarize,
 } from '../src/index.js'
+import { render } from '../src/render.js'
 
 const pkg = JSON.parse(
   readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8')
@@ -34,6 +34,7 @@ Options
                           another, outermost first: --by year --by author is a
                           row per year with its people underneath, and
                           --by author --by year inverts that
+      --no-bars           leave the histogram out, printing the counts alone
   -j, --json              print machine-readable JSON
   -m, --me                only your own commits (git config user.email)
   -a, --author <pattern>  only commits matching an author pattern
@@ -71,6 +72,7 @@ function parseArgs(argv) {
     repos: [],
     list: false,
     by: [],
+    bars: true,
     json: false,
     me: false,
     author: null,
@@ -124,6 +126,9 @@ function parseArgs(argv) {
         break
       case '--no-merges':
         opts.merges = false
+        break
+      case '--no-bars':
+        opts.bars = false
         break
       case '-r':
       case '--repo':
@@ -198,141 +203,6 @@ function parseArgs(argv) {
 function fail(message) {
   console.error(`how-many-days: ${message}`)
   process.exit(1)
-}
-
-const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
-
-const BAR_WIDTH = 24
-const bar = (value, max) => '#'.repeat(Math.max(1, Math.round((value / max) * BAR_WIDTH)))
-
-const HEADERS = ['days', 'commits', 'authors']
-const INDENT = 2
-
-/** Why an overlapping dimension's day counts sum past the total above them. */
-const SHARED_DAY = {
-  author: 'a day two people both worked counts once',
-  repo: 'a day worked in two repos counts once',
-}
-
-/**
- * Walk the nested groups into flat rows, each tagged with its depth.
- *
- * The authors count is dropped once the author dimension has been applied at
- * this level or any level above it — the row's person is already named by its
- * own label or its parent's — and on single-author histories, where the column
- * would read 1 all the way down.
- */
-function groupRows(groups, dimensions, showAuthors, depth = 0, rows = []) {
-  const countAuthors = showAuthors && !dimensions.slice(0, depth + 1).includes('author')
-  for (const group of groups) {
-    const cells = [group.days, group.commits]
-    if (countAuthors) cells.push(group.authors.length)
-    rows.push({ depth, label: group.group, days: group.days, cells })
-    if (group.groups) groupRows(group.groups, dimensions, showAuthors, depth + 1, rows)
-  }
-  return rows
-}
-
-/** True if any level's day counts sum past what contains them — see buildGroups. */
-function overlaps(groups, total) {
-  const sum = groups.reduce((acc, g) => acc + g.days, 0)
-  if (sum > total) return true
-  return groups.some((g) => g.groups && overlaps(g.groups, g.days))
-}
-
-/**
- * A breakdown table, one row per period or person that saw any work, nested when
- * more than one dimension was asked for.
- *
- * Column positions are shared across every level, so the numbers line up in one
- * grid however deep the nesting goes, and the bar tracks days rather than
- * commits: the whole point of the tool is days, and a single frantic afternoon
- * should not out-draw a steady fortnight. Bars are scaled against the largest
- * count anywhere in the table, so a nested row reads as a share of its parent.
- *
- * Only counts go in the table. Each group's first and last day are in --json,
- * where nobody has to pay for the width.
- */
-function renderGroups(stats) {
-  const dimensions = stats.by
-  const rows = groupRows(stats.groups, dimensions, stats.authors > 1)
-  const maxDays = Math.max(...rows.map((r) => r.days))
-  const labelField = Math.max(...rows.map((r) => r.depth * INDENT + r.label.length))
-  const widths = HEADERS.map((header, i) =>
-    Math.max(
-      rows.some((r) => r.cells.length > i) ? header.length : 0,
-      ...rows.map((r) => (r.cells.length > i ? String(r.cells[i]).length : 0))
-    )
-  )
-  const line = (indent, label, cells) => {
-    const padded = cells.map((cell, i) => `  ${String(cell).padStart(widths[i])}`)
-    return `  ${' '.repeat(indent)}${label.padEnd(labelField - indent)}${padded.join('')}`
-  }
-
-  const headers = HEADERS.filter((_, i) => widths[i] > 0)
-  const lines = [line(0, '', headers)]
-  for (const row of rows) {
-    lines.push(`${line(row.depth * INDENT, row.label, row.cells)}  ${bar(row.days, maxDays)}`)
-  }
-
-  // Per-person and per-repo day counts overlap, so a column of them adds up past
-  // its total. Say so, rather than letting the numbers look like a broken sum.
-  if (overlaps(stats.groups, stats.days)) {
-    const total = stats.groups.reduce((sum, g) => sum + g.days, 0)
-    const shared = dimensions
-      .filter((d) => OVERLAPPING_UNITS.includes(d))
-      .map((d) => SHARED_DAY[d])
-      .join(', and ')
-    lines.push('')
-    lines.push(
-      OVERLAPPING_UNITS.includes(dimensions[0])
-        ? `  ${total} days listed, ${stats.days} distinct — ${shared}.`
-        : `  These days overlap: ${shared}.`
-    )
-  }
-  return lines
-}
-
-function render(stats, meta, opts) {
-  const lines = []
-  const multiRepo = meta.repos.length > 1
-  if (stats.commits === 0) {
-    lines.push(`No commits found on ${meta.target}${meta.filter}.`)
-    return lines.join('\n')
-  }
-
-  lines.push(
-    `${stats.days} ${stats.days === 1 ? 'day' : 'days'} of work on ${meta.target}${meta.filter}`
-  )
-  lines.push('')
-  lines.push(`  commits         ${stats.commits}`)
-  lines.push(`  first day       ${stats.first}`)
-  lines.push(`  last day        ${stats.last}`)
-  lines.push(`  calendar span   ${plural(stats.spanDays, 'day')}`)
-  lines.push(`  longest streak  ${plural(stats.longestStreak, 'day')}`)
-  lines.push(`  commits per day ${(stats.commits / stats.days).toFixed(1)} avg`)
-  if (stats.authors > 1) lines.push(`  authors         ${stats.authors}`)
-  if (multiRepo) lines.push(`  repos           ${meta.repos.length}`)
-
-  if (opts.by.length) {
-    lines.push('')
-    lines.push(...renderGroups(stats))
-  }
-
-  if (opts.list) {
-    const max = Math.max(...stats.breakdown.map((d) => d.commits))
-    const width = String(max).length
-    lines.push('')
-    for (const day of stats.breakdown) {
-      const count = String(day.commits).padStart(width)
-      const who = stats.authors > 1 ? `  ${day.authors.join(', ')}` : ''
-      // "in" rather than a bare list, so repo names can't be read as more names.
-      const where = multiRepo ? `  in ${day.repos.join(', ')}` : ''
-      lines.push(`  ${day.day}  ${count}  ${bar(day.commits, max)}${who}${where}`)
-    }
-  }
-
-  return lines.join('\n')
 }
 
 function main() {
