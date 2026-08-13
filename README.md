@@ -1,8 +1,6 @@
 # how-many-days
 
-Counts the **distinct days of work** registered in a git branch — not commits, not
-calendar span, but the number of separate days somebody actually committed something.
-Across one repository or several at once.
+Counts the **distinct days of work** registered in one or more git repositories - not commits, not calendar span, but the number of separate days somebody actually committed something.
 
 ```
 $ how-many-days
@@ -177,8 +175,8 @@ $ how-many-days --by year --by author --since 2016-11-01 --until 2017-01-01
 
                      days  commits  authors
   2016                 42      156        2  ########################
-    slash              37      131           #####################
-    Santiago Zapata     6       25           ###
+    developer-a        37      131           #####################
+    developer-b         6       25           ###
 
   These days overlap: a day two people both worked counts once.
 ```
