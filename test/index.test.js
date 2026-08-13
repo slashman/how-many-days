@@ -1,6 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { authorLabels, dayOf, groupKeyOf, isoWeek, longestStreak, summarize } from '../src/index.js'
+import {
+  authorLabels,
+  dayOf,
+  groupKeyOf,
+  isoWeek,
+  longestStreak,
+  resolveRepos,
+  summarize,
+} from '../src/index.js'
 
 const commit = (iso, name = 'Ada', email = `${name.toLowerCase()}@example.com`) => ({
   hash: iso,
@@ -12,6 +20,9 @@ const commit = (iso, name = 'Ada', email = `${name.toLowerCase()}@example.com`) 
   email,
   subject: 'work',
 })
+
+/** A commit as readRepoCommits hands it over: tagged with the repo it came from. */
+const inRepo = (repo, iso, name) => ({ ...commit(iso, name), repo })
 
 test('buckets by the timezone the commit was recorded in', () => {
   // 23:30 in +02:00 is still the 9th where the author sat, though it is the
@@ -236,6 +247,119 @@ test('the authors count agrees with the rows an author dimension yields', () => 
   assert.equal(year.authors.length, 2)
   assert.equal(year.groups.length, 2)
   assert.deepEqual(stats.breakdown[0].authors, ['Grace', 'ada'])
+})
+
+test('a day worked in two repos is one day of work', () => {
+  const stats = summarize([
+    inRepo('mobile', '2026-03-04T09:00:00+00:00'),
+    inRepo('backend', '2026-03-04T14:00:00+00:00'),
+    inRepo('backend', '2026-03-05T14:00:00+00:00'),
+  ])
+  assert.equal(stats.days, 2)
+  assert.equal(stats.commits, 3)
+  assert.deepEqual(stats.breakdown[0], {
+    day: '2026-03-04',
+    commits: 2,
+    authors: ['Ada'],
+    repos: ['backend', 'mobile'],
+  })
+})
+
+test('streaks close over repos, so alternating days are one run', () => {
+  const stats = summarize([
+    inRepo('mobile', '2026-03-04T09:00:00+00:00'),
+    inRepo('backend', '2026-03-05T09:00:00+00:00'),
+    inRepo('mobile', '2026-03-06T09:00:00+00:00'),
+  ])
+  assert.equal(stats.longestStreak, 3)
+})
+
+test('--by repo counts each repo’s own days, busiest first', () => {
+  const stats = summarize(
+    [
+      inRepo('mobile', '2026-03-04T09:00:00+00:00'),
+      inRepo('backend', '2026-03-04T14:00:00+00:00'),
+      inRepo('backend', '2026-03-05T14:00:00+00:00'),
+    ],
+    { by: 'repo' }
+  )
+  assert.deepEqual(
+    stats.groups.map((g) => [g.group, g.days, g.commits]),
+    [
+      ['backend', 2, 2],
+      ['mobile', 1, 1],
+    ]
+  )
+  // The shared 4th belongs to both repos, so the rows sum past the real total.
+  assert.equal(stats.days, 2)
+  assert.equal(
+    stats.groups.reduce((sum, g) => sum + g.days, 0),
+    3
+  )
+})
+
+test('repo nests with periods and people, in either order', () => {
+  const commits = [
+    inRepo('mobile', '2025-12-02T09:00:00+00:00', 'Ada'),
+    inRepo('mobile', '2026-03-04T09:00:00+00:00', 'Ada'),
+    inRepo('backend', '2026-03-04T10:00:00+00:00', 'Grace'),
+  ]
+
+  const byYear = summarize(commits, { by: ['year', 'repo'] })
+  assert.deepEqual(
+    byYear.groups.map((g) => [g.group, g.days, g.groups.map((r) => [r.group, r.days])]),
+    [
+      ['2025', 1, [['mobile', 1]]],
+      [
+        '2026',
+        1,
+        [
+          ['backend', 1],
+          ['mobile', 1],
+        ],
+      ],
+    ]
+  )
+
+  const byRepo = summarize(commits, { by: ['repo', 'author'] })
+  assert.deepEqual(
+    byRepo.groups.map((g) => [g.group, g.days, g.groups.map((a) => [a.group, a.days])]),
+    [
+      ['mobile', 2, [['Ada', 2]]],
+      ['backend', 1, [['Grace', 1]]],
+    ]
+  )
+})
+
+test('untagged commits carry no repo breakdown', () => {
+  const stats = summarize([commit('2026-03-04T09:00:00+00:00')])
+  assert.equal('repos' in stats.breakdown[0], false)
+})
+
+test('repos are labelled by directory name, and by path when those collide', () => {
+  assert.deepEqual(
+    resolveRepos(['product-mobile', '../work/product-backend'], '/home/ada/src').map((r) => [
+      r.label,
+      r.path,
+    ]),
+    [
+      ['product-mobile', '/home/ada/src/product-mobile'],
+      ['product-backend', '/home/ada/work/product-backend'],
+    ]
+  )
+  // Two repos both called "api" would print as one row twice over.
+  assert.deepEqual(
+    resolveRepos(['mobile/api', 'web/api'], '/home/ada').map((r) => r.label),
+    ['mobile/api', 'web/api']
+  )
+})
+
+test('the same repo named twice is counted once', () => {
+  const repos = resolveRepos(['mobile', './mobile', '../ada/mobile'], '/home/ada')
+  assert.deepEqual(
+    repos.map((r) => r.path),
+    ['/home/ada/mobile']
+  )
 })
 
 test('ISO weeks belong to the year holding their Thursday', () => {

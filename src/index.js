@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { basename, resolve } from 'node:path'
 
 const FIELD = '\u001f'
 const RECORD = '\u001e'
@@ -93,6 +94,63 @@ export function readCommits(opts = {}) {
     })
 }
 
+/**
+ * Turn `--repo` arguments into { spec, path, label } records.
+ *
+ * The label is the directory name, since that is what people call their repos —
+ * `--repo ../work/product-mobile` reads as `product-mobile`. When two paths share
+ * a directory name (an `api` under two different parents) both fall back to the
+ * path as typed, which is the only spelling the user can tell apart.
+ *
+ * The same repo named twice is collapsed. Days would merge anyway, but its
+ * commits would be counted once per mention, quietly inflating every other
+ * number in the report.
+ */
+export function resolveRepos(specs, cwd = process.cwd()) {
+  const seen = new Set()
+  const repos = []
+  for (const spec of specs) {
+    const path = resolve(cwd, spec)
+    if (seen.has(path)) continue
+    seen.add(path)
+    repos.push({ spec, path, label: basename(path) })
+  }
+
+  const counts = new Map()
+  for (const repo of repos) counts.set(repo.label, (counts.get(repo.label) ?? 0) + 1)
+  return repos.map((repo) => (counts.get(repo.label) > 1 ? { ...repo, label: repo.spec } : repo))
+}
+
+/**
+ * Read commits from several repositories, tagging each with the repo it came
+ * from.
+ *
+ * The result is one flat list, so everything downstream — day bucketing, streaks,
+ * grouping — treats work in three repos exactly like work in one. That is the
+ * whole point: a day spent in the mobile app and the backend is one day of work,
+ * and it merges by virtue of landing in the same day bucket.
+ *
+ * A repo may carry its own `author`, overriding the shared one, since the person
+ * asking can be a different email address in each of their checkouts.
+ */
+export function readRepoCommits(repos, opts = {}) {
+  const commits = []
+  for (const repo of repos) {
+    let batch
+    try {
+      batch = readCommits({ ...opts, cwd: repo.path, author: repo.author ?? opts.author ?? null })
+    } catch (err) {
+      // Name the repo that failed: with several in play, a bare "unknown
+      // revision" leaves the user guessing which one it came from.
+      const e = new Error(`${repo.label}: ${err.message}`)
+      e.code = err.code
+      throw e
+    }
+    for (const commit of batch) commits.push({ ...commit, repo: repo.label })
+  }
+  return commits
+}
+
 const pad = (n) => String(n).padStart(2, '0')
 
 /**
@@ -140,7 +198,13 @@ export function longestStreak(days) {
 }
 
 export const PERIOD_UNITS = ['year', 'month', 'week']
-export const GROUP_UNITS = [...PERIOD_UNITS, 'author']
+export const GROUP_UNITS = [...PERIOD_UNITS, 'author', 'repo']
+
+/**
+ * Dimensions whose day counts overlap, so a column of them sums past its total:
+ * one day can belong to two people, and to two repos, without being two days.
+ */
+export const OVERLAPPING_UNITS = ['author', 'repo']
 
 /**
  * ISO-8601 week label for a `YYYY-MM-DD` day, e.g. `2026-W32`.
@@ -213,8 +277,18 @@ export function authorLabels(commits) {
 }
 
 /** The bucket one commit falls into along a single dimension. */
-const keyOf = (dimension, day, commit) =>
-  dimension === 'author' ? authorKeyOf(commit) : groupKeyOf(day, dimension)
+const keyOf = (dimension, day, commit) => {
+  switch (dimension) {
+    case 'author':
+      return authorKeyOf(commit)
+    // Untagged commits — a library caller passing readCommits straight through —
+    // all belong to the one repo they came from, whatever it is called.
+    case 'repo':
+      return commit.repo ?? ''
+    default:
+      return groupKeyOf(day, dimension)
+  }
+}
 
 /**
  * Break days down along one or more dimensions, nesting as it goes.
@@ -226,17 +300,18 @@ const keyOf = (dimension, day, commit) =>
  *
  * Days are counted, not calendar days elapsed — a year with commits on 18 days
  * reports 18 — and buckets with no work are absent rather than zero. Day counts
- * along the author dimension overlap: two people committing on the same day is
- * one day of work, and it belongs to both of them, so those rows sum to more
- * than their parent's total. That is inherent to the question, not a bug.
+ * along the author and repo dimensions overlap: two people committing on the
+ * same day is one day of work, and it belongs to both of them, exactly as a day
+ * spent in two repos belongs to both — so those rows sum to more than their
+ * parent's total. That is inherent to the question, not a bug.
  *
  * `authors` holds one entry per person, not per spelling of a name, so its
  * length agrees with both the top-level `authors` count and the number of rows
  * an `author` dimension nested underneath would produce.
  *
  * Periods come out chronologically (the input is sorted and every key form is
- * monotonic in date, so insertion order is enough). People come out busiest
- * first, since there is no natural order to fall back on.
+ * monotonic in date, so insertion order is enough). People and repos come out
+ * busiest first, since there is no natural order to fall back on.
  */
 export function buildGroups(days, byDay, dimensions, labels) {
   const entries = []
@@ -273,7 +348,7 @@ function groupEntries(entries, [dimension, ...rest], labels) {
     ...(rest.length ? { groups: groupEntries(bucket.entries, rest, labels) } : {}),
   }))
 
-  if (dimension !== 'author') return rows
+  if (PERIOD_UNITS.includes(dimension)) return rows
   return rows.sort(
     (a, b) => b.days - a.days || b.commits - a.commits || a.group.localeCompare(b.group)
   )
@@ -291,6 +366,7 @@ export function summarize(commits, opts = {}) {
 
   const days = [...byDay.keys()].sort()
   const labels = authorLabels(commits)
+  const tagged = commits.some((commit) => commit.repo !== undefined)
   const first = days[0] ?? null
   const last = days[days.length - 1] ?? null
   // One dimension or several; a bare string is accepted for convenience.
@@ -311,6 +387,9 @@ export function summarize(commits, opts = {}) {
         day,
         commits: dayCommits.length,
         authors: [...new Set(dayCommits.map((c) => labels.get(authorKeyOf(c))))].sort(),
+        // Only when the commits were read from named repos; a single unnamed
+        // history has nothing to say here.
+        ...(tagged ? { repos: [...new Set(dayCommits.map((c) => c.repo))].sort() } : {}),
       }
     }),
   }

@@ -2,6 +2,7 @@
 
 Counts the **distinct days of work** registered in a git branch — not commits, not
 calendar span, but the number of separate days somebody actually committed something.
+Across one repository or several at once.
 
 ```
 $ how-many-days
@@ -36,9 +37,11 @@ npx how-many-days
 ```
 how-many-days [options] [-- <git log args>]
 
+  -r, --repo <path>       add a repository to the calculation; repeat for as
+                          many as you like and their histories merge
   -l, --list              show a per-day breakdown
-      --by <dimension>    break the days down by year, month, week or author;
-                          repeat to nest, outermost first
+      --by <dimension>    break the days down by year, month, week, author or
+                          repo; repeat to nest, outermost first
   -j, --json              print machine-readable JSON
   -m, --me                only your own commits (git config user.email)
   -a, --author <pattern>  only commits matching an author pattern
@@ -69,11 +72,63 @@ how-many-days --base main              # days spent on this branch alone
 how-many-days --since "3 months ago"   # a recent slice
 how-many-days --day-start 5 --tz local # 2am commits count as the day before
 how-many-days --json | jq .days        # one number, for scripts
+how-many-days -r ../mobile -r ../api   # both repos, as one body of work
 ```
+
+## Several repos at once
+
+Work rarely lives in one repository. `--repo` adds another one to the same
+calculation, as many times as you like:
+
+```
+$ how-many-days --repo product-mobile --repo product-backend
+5 days of work on product-mobile, product-backend
+
+  commits         7
+  first day       2026-03-04
+  last day        2026-03-08
+  calendar span   5 days
+  longest streak  5 days
+  commits per day 1.4 avg
+  authors         2
+  repos           2
+```
+
+The histories **merge by day**, which is the whole point: a day you touched both
+the app and the backend is one day of work, not two. Streaks close over the seam
+as well, so committing to the mobile app on Monday and the backend on Tuesday is
+a two-day streak.
+
+Paths are relative to where you run the command, so you normally run it from the
+directory holding your checkouts — which doesn't have to be a repository itself.
+Repos are named after their directory, unless two of them share a name, in which
+case both are labelled with the path you typed. Naming the same repo twice counts
+it once. `--branch`, `--since`, `--base` and the rest apply to every repo, and if
+one of them can't answer — no such branch, say — the error names the repo.
+
+`--by repo` shows what each one contributed, and nests with the other dimensions
+like anything else:
+
+```
+$ how-many-days -r product-mobile -r product-backend --by repo --by author
+
+                   days  commits  authors
+  product-backend     3        4        2  ########################
+    Ada               2        2  ################
+    Grace             2        2  ################
+  product-mobile      3        3        1  ########################
+    Ada               3        3  ########################
+
+  6 days listed, 5 distinct — a day worked in two repos counts once, and a day two people both worked counts once.
+```
+
+With `--list`, each day names the repos it was worked in; with `--json`, every
+day carries a `repos` array and the top level lists each repo with the ref that
+was counted.
 
 ## Breakdowns
 
-`--by year|month|week|author` breaks the days down along a dimension. Every
+`--by year|month|week|author|repo` breaks the days down along a dimension. Every
 column counts days of work, so a year that saw two commits reports 1 day, not
 365 — and buckets with no work at all are left out rather than printed as zeroes.
 
@@ -108,7 +163,8 @@ Repeat `--by` to break one dimension down by another, outermost first. The order
 is the view: `--by year --by author` is a row per year with its people
 underneath, and `--by author --by year` inverts it. `--by year,author` is
 shorthand for the same thing. One period at a time, so `--by year --by month` is
-an error rather than a guess.
+an error rather than a guess; periods, people and repos combine freely otherwise,
+as in `--by year --by repo --by author`.
 
 ```
 $ how-many-days --by year --by author --since 2016-11-01 --until 2017-01-01
@@ -121,12 +177,13 @@ $ how-many-days --by year --by author --since 2016-11-01 --until 2017-01-01
     slash              37      131  #####################
     Santiago Zapata     6       25  ###
 
-  Per-person days overlap: a day two people both worked counts once in the total.
+  These days overlap: a day two people both worked counts once.
 ```
 
-Per-person day counts overlap, which is why they add up to more than the total
-above them: a day two people both worked is one day of work, and it belongs to
-both of them. The tool says so rather than leaving the sum looking broken.
+Per-person and per-repo day counts overlap, which is why they add up to more than
+the total above them: a day two people both worked is one day of work, and it
+belongs to both of them, exactly as a day spent in two repos belongs to both. The
+tool says so rather than leaving the sum looking broken.
 
 People are identified by **email**, not by name, so one contributor who has
 spelled `user.name` three different ways over the years stays one row — labelled

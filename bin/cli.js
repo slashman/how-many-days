@@ -1,13 +1,16 @@
 #!/usr/bin/env node
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   GROUP_UNITS,
+  OVERLAPPING_UNITS,
   PERIOD_UNITS,
   assertGitRepo,
   currentUserEmail,
   describeRef,
-  readCommits,
+  readRepoCommits,
+  resolveRepos,
   summarize,
 } from '../src/index.js'
 
@@ -22,9 +25,12 @@ Usage
   how-many-days [options] [-- <git log args>]
 
 Options
+  -r, --repo <path>       add a repository to the calculation. Repeat it for as
+                          many as you like and their histories merge, so a day
+                          worked in two repos still counts as one day
   -l, --list              show a per-day breakdown
-      --by <dimension>    break the days down by year, month, week (ISO weeks)
-                          or author. Repeat it to nest one dimension inside
+      --by <dimension>    break the days down by year, month, week (ISO weeks),
+                          author or repo. Repeat it to nest one dimension inside
                           another, outermost first: --by year --by author is a
                           row per year with its people underneath, and
                           --by author --by year inverts that
@@ -55,10 +61,14 @@ Examples
   how-many-days --base main              days spent on this branch alone
   how-many-days --day-start 5 --tz local nights count toward the day before
   how-many-days -- --first-parent        forward extra flags to git log
+  how-many-days -r ../mobile -r ../api   days across two repos, merged
+  how-many-days -r ../mobile -r ../api --by repo
+                                         …and how many each of them saw
 `.trim()
 
 function parseArgs(argv) {
   const opts = {
+    repos: [],
     list: false,
     by: [],
     json: false,
@@ -114,6 +124,11 @@ function parseArgs(argv) {
         break
       case '--no-merges':
         opts.merges = false
+        break
+      case '-r':
+      case '--repo':
+        opts.repos.push(need(i, arg))
+        i++
         break
       case '-a':
       case '--author':
@@ -193,6 +208,12 @@ const bar = (value, max) => '#'.repeat(Math.max(1, Math.round((value / max) * BA
 const HEADERS = ['days', 'commits', 'authors']
 const INDENT = 2
 
+/** Why an overlapping dimension's day counts sum past the total above them. */
+const SHARED_DAY = {
+  author: 'a day two people both worked counts once',
+  repo: 'a day worked in two repos counts once',
+}
+
 /**
  * Walk the nested groups into flat rows, each tagged with its depth.
  *
@@ -254,16 +275,19 @@ function renderGroups(stats) {
     lines.push(`${line(row.depth * INDENT, row.label, row.cells)}  ${bar(row.days, maxDays)}`)
   }
 
-  // Per-person day counts overlap, so a column of them adds up past its total.
-  // Say so, rather than letting the numbers look like a broken sum.
+  // Per-person and per-repo day counts overlap, so a column of them adds up past
+  // its total. Say so, rather than letting the numbers look like a broken sum.
   if (overlaps(stats.groups, stats.days)) {
     const total = stats.groups.reduce((sum, g) => sum + g.days, 0)
-    const shared = 'a day two people both worked counts once'
+    const shared = dimensions
+      .filter((d) => OVERLAPPING_UNITS.includes(d))
+      .map((d) => SHARED_DAY[d])
+      .join(', and ')
     lines.push('')
     lines.push(
-      dimensions[0] === 'author'
+      OVERLAPPING_UNITS.includes(dimensions[0])
         ? `  ${total} days listed, ${stats.days} distinct — ${shared}.`
-        : `  Per-person days overlap: ${shared} in the total.`
+        : `  These days overlap: ${shared}.`
     )
   }
   return lines
@@ -271,13 +295,14 @@ function renderGroups(stats) {
 
 function render(stats, meta, opts) {
   const lines = []
+  const multiRepo = meta.repos.length > 1
   if (stats.commits === 0) {
-    lines.push(`No commits found on ${meta.ref}${meta.filter}.`)
+    lines.push(`No commits found on ${meta.target}${meta.filter}.`)
     return lines.join('\n')
   }
 
   lines.push(
-    `${stats.days} ${stats.days === 1 ? 'day' : 'days'} of work on ${meta.ref}${meta.filter}`
+    `${stats.days} ${stats.days === 1 ? 'day' : 'days'} of work on ${meta.target}${meta.filter}`
   )
   lines.push('')
   lines.push(`  commits         ${stats.commits}`)
@@ -287,6 +312,7 @@ function render(stats, meta, opts) {
   lines.push(`  longest streak  ${plural(stats.longestStreak, 'day')}`)
   lines.push(`  commits per day ${(stats.commits / stats.days).toFixed(1)} avg`)
   if (stats.authors > 1) lines.push(`  authors         ${stats.authors}`)
+  if (multiRepo) lines.push(`  repos           ${meta.repos.length}`)
 
   if (opts.by.length) {
     lines.push('')
@@ -300,7 +326,9 @@ function render(stats, meta, opts) {
     for (const day of stats.breakdown) {
       const count = String(day.commits).padStart(width)
       const who = stats.authors > 1 ? `  ${day.authors.join(', ')}` : ''
-      lines.push(`  ${day.day}  ${count}  ${bar(day.commits, max)}${who}`)
+      // "in" rather than a bare list, so repo names can't be read as more names.
+      const where = multiRepo ? `  in ${day.repos.join(', ')}` : ''
+      lines.push(`  ${day.day}  ${count}  ${bar(day.commits, max)}${who}${where}`)
     }
   }
 
@@ -311,16 +339,36 @@ function main() {
   const opts = parseArgs(process.argv.slice(2))
   const cwd = process.cwd()
 
-  assertGitRepo(cwd)
-
-  let author = opts.author
-  if (opts.me) {
-    const email = currentUserEmail(cwd)
-    if (!email) fail('no git user.email configured, so --me has nobody to match')
-    author = email
+  // Named repos stand in for the working directory entirely: you run this from
+  // wherever your checkouts happen to live, which needn't be a repo itself.
+  const named = opts.repos.length > 0
+  const repos = named
+    ? resolveRepos(opts.repos, cwd)
+    : [{ spec: '.', path: cwd, label: basename(cwd) }]
+  if (named) {
+    for (const repo of repos) {
+      if (!existsSync(repo.path)) fail(`${repo.spec}: no such directory`)
+    }
+  } else {
+    assertGitRepo(cwd)
   }
 
-  const commits = readCommits({ ...opts, cwd, author })
+  // One author pattern for every repo, unless --me gives each its own.
+  let author = opts.author
+  let who = author
+  if (opts.me) {
+    // Each repo knows who I am in it: a repo-local user.email shadows the global
+    // one, so ask inside each rather than assuming one identity covers them all.
+    // Any repo that answers nothing borrows the first identity we did find.
+    for (const repo of repos) repo.author = currentUserEmail(repo.path)
+    const emails = [...new Set(repos.map((repo) => repo.author).filter(Boolean))]
+    if (!emails.length) fail('no git user.email configured, so --me has nobody to match')
+    for (const repo of repos) repo.author ||= emails[0]
+    author = null
+    who = emails.join(', ')
+  }
+
+  const commits = readRepoCommits(repos, { ...opts, author })
   const stats = summarize(commits, {
     tz: opts.tz,
     dayStart: opts.dayStart,
@@ -328,18 +376,29 @@ function main() {
     by: opts.by,
   })
 
+  const described = repos.map((repo) => ({
+    repo: repo.label,
+    ref: describeRef(opts.ref, repo.path),
+  }))
   const filters = []
-  if (author) filters.push(`by ${author}`)
+  // With several repos the header names them instead of a branch, so an explicit
+  // ref has nowhere else to go.
+  if (named && opts.ref !== 'HEAD') filters.push(`on ${opts.ref}`)
+  if (who) filters.push(`by ${who}`)
   if (opts.base) filters.push(`not in ${opts.base}`)
   if (opts.since) filters.push(`since ${opts.since}`)
   if (opts.until) filters.push(`until ${opts.until}`)
   const meta = {
-    ref: describeRef(opts.ref, cwd),
+    repos: described,
+    target: named ? described.map((r) => r.repo).join(', ') : described[0].ref,
     filter: filters.length ? ` (${filters.join(', ')})` : '',
   }
 
   if (opts.json) {
-    console.log(JSON.stringify({ ref: meta.ref, ...stats }, null, 2))
+    // `ref` only when there is one history to name; `repos` always, so a script
+    // has one shape to read whether or not --repo was used.
+    const ref = repos.length === 1 ? { ref: described[0].ref } : {}
+    console.log(JSON.stringify({ ...ref, repos: described, ...stats }, null, 2))
   } else {
     console.log(render(stats, meta, opts))
   }
