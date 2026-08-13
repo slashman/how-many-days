@@ -1,7 +1,7 @@
 {
   "name": "how-many-days",
-  "version": "1.1.0",
-  "description": "Count how many distinct days of work are registered in the current git branch",
+  "version": "1.2.0",
+  "description": "Count how many distinct days of work are registered in one or more git repositories",
   "type": "module",
   "author": "slashie <slash@slashware.net>",
   "repository": {
