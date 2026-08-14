@@ -2,10 +2,15 @@ name: Publish
 
 # Cutting a release is `npm version <minor|patch>` followed by
 # `git push --follow-tags`: the tag push is what triggers this.
+#
+# Running it by hand instead (workflow_dispatch) does everything except the
+# publish itself, as a way to prove the trusted-publishing setup still works
+# without putting a throwaway version on the registry.
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write # create the GitHub release
@@ -32,26 +37,32 @@ jobs:
 
       # Everything that can fail runs before the publish, so a bad tag or a
       # missing changelog section costs nothing. There is no unpublishing.
-      - name: Check the tag matches package.json
+      - name: Work out which version is being released
+        id: version
         run: |
-          tag="${GITHUB_REF_NAME}"
-          pkg="v$(node -p "require('./package.json').version")"
-          if [ "$tag" != "$pkg" ]; then
-            echo "::error::tag $tag does not match package.json ($pkg)"
-            exit 1
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            if [ "$version" != "$pkg" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match package.json ($pkg)"
+              exit 1
+            fi
+          else
+            version="$pkg"
+            echo "Dry run against $version — nothing will be published."
           fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Take the release notes from CHANGELOG.md
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          awk -v v="$version" '
+          awk -v v="${{ steps.version.outputs.version }}" '
             $0 ~ "^## \\[" v "\\]" { f = 1; next }
             f && /^## \[/ { exit }
             f && /^\[/ { exit }
             f { print }
           ' CHANGELOG.md > "${RUNNER_TEMP}/notes.md"
           if [ ! -s "${RUNNER_TEMP}/notes.md" ]; then
-            echo "::error::CHANGELOG.md has no section for $version"
+            echo "::error::CHANGELOG.md has no section for ${{ steps.version.outputs.version }}"
             exit 1
           fi
           cat "${RUNNER_TEMP}/notes.md"
@@ -61,9 +72,28 @@ jobs:
 
       # No NODE_AUTH_TOKEN: npm exchanges the workflow's OIDC token for a
       # short-lived one, and turns on provenance by itself for a public package.
-      - run: npm publish
+      - name: Publish to npm
+        if: github.ref_type == 'tag'
+        run: npm publish
+
+      # npm does the same token exchange under --dry-run and skips only the
+      # upload, so this exercises trusted publishing for real. oidc() swallows
+      # its own failures, so assert on the line it logs rather than the exit
+      # code — otherwise a broken setup would look like a pass.
+      - name: Prove the OIDC exchange works, without publishing
+        if: github.ref_type != 'tag'
+        run: |
+          out="$(npm publish --dry-run --loglevel verbose 2>&1)" || { echo "$out"; exit 1; }
+          echo "$out"
+          if echo "$out" | grep -q 'Successfully retrieved and set token'; then
+            echo "OIDC token exchange succeeded — a real release would publish."
+          else
+            echo "::error::npm never exchanged the OIDC token. Check the trusted publisher on npmjs.com: repo slashman/how-many-days, workflow publish.yml, no environment."
+            exit 1
+          fi
 
       - name: Publish the GitHub release
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
