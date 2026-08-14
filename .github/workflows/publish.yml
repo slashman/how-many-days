@@ -20,19 +20,25 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      # Trusted publishing needs npm >= 11.5.1. Node 24 ships npm 11.x already,
-      # but pinning the floor keeps a runner image bump from silently disabling
-      # OIDC — npm skips it quietly rather than failing when it can't do it.
+      # Trusted publishing needs npm >= 11.5.1, and npm skips OIDC quietly
+      # rather than failing when it can't do it. Node 24 ships a new enough npm,
+      # so only step in when it doesn't — upgrading unconditionally would drag a
+      # fresh npm major into the release path without anyone choosing it.
       - name: Ensure npm supports OIDC
         run: |
-          npm install -g npm@latest
+          required=11.5.1
+          current="$(npm --version)"
+          if [ "$(printf '%s\n%s\n' "$required" "$current" | sort -V | head -1)" != "$required" ]; then
+            echo "npm $current is below $required, upgrading"
+            npm install -g npm@latest
+          fi
           npm --version
 
       # Everything that can fail runs before the publish, so a bad tag or a
@@ -83,14 +89,24 @@ jobs:
       - name: Prove the OIDC exchange works, without publishing
         if: github.ref_type != 'tag'
         run: |
-          out="$(npm publish --dry-run --loglevel verbose 2>&1)" || { echo "$out"; exit 1; }
+          out="$(npm publish --dry-run --loglevel verbose 2>&1)" && status=0 || status=$?
           echo "$out"
-          if echo "$out" | grep -q 'Successfully retrieved and set token'; then
-            echo "OIDC token exchange succeeded — a real release would publish."
-          else
+
+          if ! grep -q 'Successfully retrieved and set token' <<< "$out"; then
             echo "::error::npm never exchanged the OIDC token. Check the trusted publisher on npmjs.com: repo slashman/how-many-days, workflow publish.yml, no environment."
             exit 1
           fi
+
+          # npm checks for an existing version after the exchange, so a dry run
+          # of the version already released always ends here. That is the check
+          # passing, not failing — anything else is a real problem.
+          if [ "$status" -ne 0 ] &&
+             ! grep -q 'cannot publish over the previously published versions' <<< "$out"; then
+            echo "::error::dry run failed for some reason other than the version already existing."
+            exit "$status"
+          fi
+
+          echo "Trusted publishing works: token exchanged, provenance enabled."
 
       - name: Publish the GitHub release
         if: github.ref_type == 'tag'
