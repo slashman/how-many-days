@@ -1,0 +1,76 @@
+name: Publish
+
+# Cutting a release is `npm version <minor|patch>` followed by
+# `git push --follow-tags`: the tag push is what triggers this.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # create the GitHub release
+  id-token: write # OIDC token for npm trusted publishing
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Trusted publishing needs npm >= 11.5.1. Node 24 ships npm 11.x already,
+      # but pinning the floor keeps a runner image bump from silently disabling
+      # OIDC — npm skips it quietly rather than failing when it can't do it.
+      - name: Ensure npm supports OIDC
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      # Everything that can fail runs before the publish, so a bad tag or a
+      # missing changelog section costs nothing. There is no unpublishing.
+      - name: Check the tag matches package.json
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          pkg="v$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag $tag does not match package.json ($pkg)"
+            exit 1
+          fi
+
+      - name: Take the release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { f = 1; next }
+            f && /^## \[/ { exit }
+            f && /^\[/ { exit }
+            f { print }
+          ' CHANGELOG.md > "${RUNNER_TEMP}/notes.md"
+          if [ ! -s "${RUNNER_TEMP}/notes.md" ]; then
+            echo "::error::CHANGELOG.md has no section for $version"
+            exit 1
+          fi
+          cat "${RUNNER_TEMP}/notes.md"
+
+      # prepublishOnly runs these again; doing it here names the failing step.
+      - run: npm test
+
+      # No NODE_AUTH_TOKEN: npm exchanges the workflow's OIDC token for a
+      # short-lived one, and turns on provenance by itself for a public package.
+      - run: npm publish
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file "${RUNNER_TEMP}/notes.md"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file "${RUNNER_TEMP}/notes.md"
+          fi
